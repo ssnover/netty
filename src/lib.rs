@@ -16,25 +16,11 @@ impl NettyStack {
     pub fn new(if_name: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let tun = tokio_tun::TunBuilder::new()
             .name(if_name)
-            .tap(false)
+            .tap(true)
             .packet_info(false)
             .up()
             .try_build()?;
-        let raw_fd = tun.as_raw_fd();
         let (reader, writer) = tokio::io::split(tun);
-        // TODO: How on earth do I set the hwaddr? Seems like maybe the fd I'm using here is wrong...
-        let mut sa_data = [0i8; 14];
-        sa_data[0] = 1;
-        sa_data[1] = 2;
-        sa_data[2] = 3;
-        sa_data[3] = 4;
-        sa_data[4] = 5;
-        sa_data[5] = 6;
-        let sockaddr = libc::sockaddr {
-            sa_data,
-            sa_family: libc::ARPHRD_ETHER,
-        };
-        netdevice::set_hardware(raw_fd, "tun0", sockaddr).unwrap();
         Ok(Self { reader, writer })
     }
 

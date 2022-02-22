@@ -13,10 +13,9 @@ path = "src/lib.rs"
 
 [dependencies]
 byteorder = "1.4"
-libc = "0.2"
-netdevice = "0.1"
+futures = "0.3"
 num-derive = "0.3"
 num-traits = "0.2"
-nix = "0.23"
+rtnetlink = "0.9"
 tokio = { version = "1.16", features = ["full"] }
 tokio-tun = "0.5.1"
