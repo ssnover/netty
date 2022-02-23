@@ -3,7 +3,11 @@ use netty::NettyStack;
 use std::net::{IpAddr, Ipv4Addr};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    log::set_logger(&LOGGER)
+        .map(|()| log::set_max_level(log::LevelFilter::Info))
+        .unwrap();
+
     let if_name = "tap0";
     let mut netty = NettyStack::new(if_name)?;
 
@@ -19,7 +23,7 @@ async fn add_address(
     if_name: &str,
     addr: IpAddr,
     handle: rtnetlink::Handle,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut links = handle
         .link()
         .get()
@@ -33,4 +37,21 @@ async fn add_address(
             .await?;
     }
     Ok(())
+}
+
+struct SimpleStdoutLogger;
+static LOGGER: SimpleStdoutLogger = SimpleStdoutLogger;
+
+impl log::Log for SimpleStdoutLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            println!("{} - {}", record.level(), record.args());
+        }
+    }
+
+    fn flush(&self) {}
 }

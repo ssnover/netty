@@ -12,7 +12,6 @@ pub enum Ethertype {
     IPv4 = 0x0800,
     ARP = 0x0806,
     RARP = 0x8035,
-    ICMPv4 = 0x0A00,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -29,7 +28,8 @@ impl Header {
         cursor.read_exact(&mut dmac)?;
         let mut smac = [0u8; 6];
         cursor.read_exact(&mut smac)?;
-        let ethertype = match FromPrimitive::from_u16(cursor.read_u16::<NetworkEndian>()?) {
+        let raw_ethertype = cursor.read_u16::<NetworkEndian>()?;
+        let ethertype = match FromPrimitive::from_u16(raw_ethertype) {
             Some(ethertype) => ethertype,
             None => return Err(io::ErrorKind::Unsupported.into()),
         };
@@ -39,7 +39,7 @@ impl Header {
                 smac,
                 ethertype,
             },
-            &buf[..HEADER_SIZE],
+            &buf[HEADER_SIZE..],
         ))
     }
 

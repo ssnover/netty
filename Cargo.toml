@@ -12,10 +12,12 @@ name = "netty"
 path = "src/lib.rs"
 
 [dependencies]
+async-channel = "1.6"
 byteorder = "1.4"
 futures = "0.3"
+log = "0.4"
 num-derive = "0.3"
 num-traits = "0.2"
 rtnetlink = "0.9"
 tokio = { version = "1.16", features = ["full"] }
-tokio-tun = "0.5.1"
+tokio-tun = { path = "../tokio-tun" }
