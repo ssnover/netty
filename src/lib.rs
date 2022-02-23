@@ -5,6 +5,7 @@ use tokio_tun::Tun;
 
 mod arp;
 mod eth;
+mod ipv4;
 
 pub const PACKET_SIZE: usize = 1500;
 const ARP_TABLE_ENTRIES: usize = 32;
@@ -78,17 +79,15 @@ impl NettyStack {
                         })
                 {
                     // Update the ARP entry
-                    log::info!("Updating ARP entry");
                     entry.mac = arp_data.smac;
                 } else {
                     // Insert a new entry
-                    if let Some(ref mut entry) = self
+                    if let Some(position) = self
                         .arp_translation_table
                         .into_iter()
-                        .find(|&entry| entry.is_none())
+                        .position(|entry| entry.is_none())
                     {
-                        log::info!("New ARP entry");
-                        *entry = Some(arp::CacheEntry {
+                        self.arp_translation_table[position] = Some(arp::CacheEntry {
                             hwtype: hdr.hwtype,
                             ip: arp_data.sip,
                             mac: arp_data.smac,
@@ -100,7 +99,6 @@ impl NettyStack {
 
                 // Is it an ARP request?
                 if hdr.opcode == arp::Opcode::ArpRequest {
-                    log::info!("ARP request");
                     let reply_hdr = arp::Header {
                         hwtype: arp::HwType::Ethernet,
                         protype: arp::ProtocolType::Ipv4,
@@ -138,6 +136,8 @@ impl NettyStack {
     }
 
     async fn handle_ipv4(&mut self, packet: &[u8]) -> io::Result<()> {
+        let (hdr, _ip_payload) = ipv4::Header::decode(packet)?;
+        log::info!("Got ipv4 message from: {}", hdr.src_addr);
         Ok(())
     }
 }
