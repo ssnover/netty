@@ -5,7 +5,9 @@ use tokio_tun::Tun;
 
 mod arp;
 mod eth;
+mod icmpv4;
 mod ipv4;
+mod util;
 
 pub const PACKET_SIZE: usize = 1500;
 const ARP_TABLE_ENTRIES: usize = 32;
@@ -18,9 +20,7 @@ pub struct NettyStack {
 }
 
 impl NettyStack {
-    pub fn new<'a>(
-        if_name: &'a str,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new<'a>(if_name: &'a str) -> Result<Self, Box<dyn std::error::Error>> {
         let tun = tokio_tun::TunBuilder::new()
             .name(if_name)
             .tap(true)
@@ -131,13 +131,81 @@ impl NettyStack {
         idx += data.encode(&mut buf[idx..])?;
         log::info!("ARP packet len: {}", idx);
         let trailer_len = 18;
-        self.writer.write_all(&buf[..idx+trailer_len]).await?;
+        self.writer.write_all(&buf[..idx + trailer_len]).await?;
         Ok(())
     }
 
+    fn do_arp_lookup(&self, ip_addr: Ipv4Addr) -> Option<[u8; 6]> {
+        if let Some(entry) = self.arp_translation_table.iter().find(|&&entry| {
+            if let Some(entry) = entry {
+                entry.ip == ip_addr
+            } else {
+                false
+            }
+        }) {
+            Some(entry.unwrap().mac)
+        } else {
+            None
+        }
+    }
+
     async fn handle_ipv4(&mut self, packet: &[u8]) -> io::Result<()> {
-        let (hdr, _ip_payload) = ipv4::Header::decode(packet)?;
-        log::info!("Got ipv4 message from: {}", hdr.src_addr);
+        let (hdr, ip_payload) = ipv4::Header::decode(packet)?;
+        if hdr.dst_addr == self.netdev.ipaddr {
+            if hdr.proto == ipv4::ProtocolType::IcmpV4 {
+                log::info!("Got a ping from {}", hdr.src_addr);
+                self.handle_icmpv4(hdr, ip_payload).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_icmpv4(&mut self, mut ip_hdr: ipv4::Header, ip_data: &[u8]) -> io::Result<()> {
+        let (icmp_hdr, payload) = icmpv4::Header::decode(ip_data)?;
+        if icmp_hdr.msg_type == icmpv4::MsgType::EchoRequest {
+            let (echo_hdr, _payload) = icmpv4::EchoHeader::decode(payload)?;
+            let echo_reply_hdr = icmpv4::EchoHeader {
+                id: echo_hdr.id,
+                seq: echo_hdr.seq,
+            };
+            let mut icmp_hdr = icmpv4::Header {
+                msg_type: icmpv4::MsgType::EchoReply,
+                code: 0,
+                checksum: 0,
+            };
+            let mut buf = [0u8; icmpv4::HEADER_SIZE + icmpv4::ECHO_HEADER_SIZE];
+            let _ = icmp_hdr.clone().encode(&mut buf)?;
+            let _ = echo_reply_hdr
+                .clone()
+                .encode(&mut buf[icmpv4::HEADER_SIZE..])?;
+            let checksum = util::checksum(&buf);
+            icmp_hdr.checksum = checksum;
+
+            ip_hdr.datagram_len = (icmpv4::ECHO_HEADER_SIZE
+                + icmpv4::HEADER_SIZE
+                + ipv4::HEADER_SIZE
+                + _payload.len()) as u16;
+            ip_hdr.checksum = 0;
+            ip_hdr.dst_addr = ip_hdr.src_addr;
+            ip_hdr.src_addr = self.netdev.ipaddr;
+            if let Some(dmac) = self.do_arp_lookup(ip_hdr.dst_addr) {
+                let mut buf = [0u8; 1500];
+                let eth_hdr = eth::Header {
+                    smac: self.netdev.hwaddr,
+                    dmac,
+                    ethertype: eth::Ethertype::IPv4,
+                };
+                let mut idx = 0;
+                idx += eth_hdr.encode(&mut buf[idx..])?;
+                idx += ip_hdr.encode(&mut buf[idx..])?;
+                idx += icmp_hdr.encode(&mut buf[idx..])?;
+                idx += echo_reply_hdr.encode(&mut buf[idx..])?;
+                let mut cursor = io::Cursor::new(&mut buf[idx..]);
+                let _ = cursor.write_all(_payload).await?;
+                idx += _payload.len();
+                self.writer.write_all(&buf[..idx]).await?;
+            }
+        }
         Ok(())
     }
 }
