@@ -12,7 +12,9 @@ name = "netty"
 path = "src/lib.rs"
 
 [dependencies]
+array-init = "2.0"
 async-channel = "1.6"
+atomic = "0.5"
 byteorder = "1.4"
 futures = "0.3"
 log = "0.4"

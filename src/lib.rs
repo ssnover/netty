@@ -7,9 +7,10 @@ mod arp;
 mod eth;
 mod icmpv4;
 mod ipv4;
+pub mod packet_pool;
+pub use packet_pool::*;
 mod util;
 
-pub const PACKET_SIZE: usize = 1500;
 const ARP_TABLE_ENTRIES: usize = 32;
 
 pub struct NettyStack {
@@ -169,10 +170,13 @@ impl NettyStack {
                 seq: echo_hdr.seq,
             };
             let mut buf = [0u8; 1500];
-            let end_payload_start = eth::HEADER_SIZE + ipv4::HEADER_SIZE + icmpv4::HEADER_SIZE + icmpv4::ECHO_HEADER_SIZE;
+            let end_payload_start = eth::HEADER_SIZE
+                + ipv4::HEADER_SIZE
+                + icmpv4::HEADER_SIZE
+                + icmpv4::ECHO_HEADER_SIZE;
             let mut cursor = io::Cursor::new(&mut buf[end_payload_start..]);
             cursor.write_all(_payload).await?;
-            echo_reply_hdr.encode(&mut buf[end_payload_start-icmpv4::ECHO_HEADER_SIZE..])?;
+            echo_reply_hdr.encode(&mut buf[end_payload_start - icmpv4::ECHO_HEADER_SIZE..])?;
 
             let mut icmp_hdr = icmpv4::Header {
                 msg_type: icmpv4::MsgType::EchoReply,
@@ -181,7 +185,8 @@ impl NettyStack {
             };
             let ip_payload_start = eth::HEADER_SIZE + ipv4::HEADER_SIZE;
             let _ = icmp_hdr.clone().encode(&mut buf[ip_payload_start..])?;
-            let checksum = util::checksum(&buf[ip_payload_start..end_payload_start+_payload.len()]);
+            let checksum =
+                util::checksum(&buf[ip_payload_start..end_payload_start + _payload.len()]);
             icmp_hdr.checksum = checksum;
             icmp_hdr.encode(&mut buf[ip_payload_start..])?;
 
@@ -196,14 +201,17 @@ impl NettyStack {
             let _ = ip_hdr.encode(&mut buf[eth_payload_start..])?;
             ip_hdr.checksum = util::checksum(&buf[eth_payload_start..ip_payload_start]);
             ip_hdr.encode(&mut buf[eth_payload_start..])?;
+
             if let Some(dmac) = self.do_arp_lookup(ip_hdr.dst_addr) {
                 let eth_hdr = eth::Header {
                     smac: self.netdev.hwaddr,
                     dmac,
                     ethertype: eth::Ethertype::IPv4,
                 };
-                let _ =  eth_hdr.encode(&mut buf[0..])?;
-                self.writer.write_all(&buf[..end_payload_start + _payload.len()]).await?;
+                let _ = eth_hdr.encode(&mut buf[0..])?;
+                self.writer
+                    .write_all(&buf[..end_payload_start + _payload.len()])
+                    .await?;
             }
         }
         Ok(())

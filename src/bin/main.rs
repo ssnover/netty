@@ -7,6 +7,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::set_logger(&LOGGER)
         .map(|()| log::set_max_level(log::LevelFilter::Info))
         .unwrap();
+    const NUM_PACKETS: usize = 32;
+    let mut packet_pool_buffer = [0u8; netty::PACKET_SIZE * NUM_PACKETS];
+
+    let pool = netty::PacketPool::<NUM_PACKETS>::new(&mut packet_pool_buffer).unwrap();
 
     let if_name = "tap0";
     let mut netty = NettyStack::new(if_name)?;
