@@ -2,6 +2,15 @@ use std::io;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
+#[macro_export]
+macro_rules! crate_static_pool {
+    ($num_packets:literal) => {{
+        let mut buf = std::boxed::Box::new([0u8; netty::PACKET_SIZE * $num_packets]);
+        let mut buf = std::boxed::Box::leak(buf);
+        netty::PacketPool::<$num_packets>::new(buf).unwrap()
+    }};
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum PacketStatus {
     /// This slot in the packet pool is ready to be used
@@ -25,7 +34,7 @@ pub const PACKET_SIZE: usize = 1568;
 pub struct Packet<'buf, 'pool, const SIZE: usize> {
     idx: usize,
     buf: *mut u8,
-    used_bytes: Option<usize>,
+    used_bytes: usize,
     pool: &'pool PacketPool<'buf, SIZE>,
 }
 
@@ -38,26 +47,37 @@ impl<'buf, 'pool, const SIZE: usize> Packet<'buf, 'pool, SIZE> {
         Packet {
             idx,
             buf: pkt.buf,
-            used_bytes: Some(pkt.used_bytes),
+            used_bytes: pkt.used_bytes,
             pool,
         }
     }
 
-    pub fn write_data(&self, idx: usize, buf: &[u8]) -> io::Result<()> {
+    pub fn capacity(&self) -> usize {
+        PACKET_SIZE
+    }
+
+    pub fn write_data(&mut self, idx: usize, buf: &[u8]) -> io::Result<()> {
         if idx + buf.len() > PACKET_SIZE {
             Err(std::io::ErrorKind::InvalidInput.into())
         } else {
-            unsafe { self.buf.copy_from(buf.as_ptr(), buf.len()); }
+            // No need to do min here since we're pre-checking the buffer size
+            unsafe {
+                self.buf.copy_from(buf.as_ptr(), buf.len());
+            }
+            self.used_bytes = std::cmp::max(self.used_bytes, idx + buf.len());
             Ok(())
         }
     }
 
-    pub fn read_data(self, buf: &mut[u8]) -> io::Result<usize> {
-        unsafe { self.buf.copy_to(buf.as_mut_ptr(), buf.len()); }
+    pub fn read_data(self, buf: &mut [u8]) -> io::Result<usize> {
+        unsafe {
+            self.buf
+                .copy_to(buf.as_mut_ptr(), std::cmp::min(buf.len(), PACKET_SIZE));
+        }
         if buf.len() < PACKET_SIZE {
             Err(std::io::ErrorKind::UnexpectedEof.into())
         } else {
-            Ok(self.used_bytes.unwrap_or(PACKET_SIZE))
+            Ok(self.used_bytes)
         }
     }
 }
@@ -77,6 +97,10 @@ struct PacketInner<'buf> {
     buf: *mut u8,
     used_bytes: usize,
     _marker: PhantomData<&'buf ()>,
+}
+
+unsafe impl<'buf> Send for PacketInner<'buf> {
+    
 }
 
 /// Maintains the buffer of the packet pool and gives access to free packets
@@ -106,7 +130,7 @@ impl<'pool, 'buf, const PACKETS: usize> PacketPool<'buf, PACKETS> {
             Ok(pool)
         }
     }
-   
+
     /// Checks the packet pool for an unused packet slot and returns one if its available.
     pub fn allocate(&'pool self) -> Option<Packet<'buf, 'pool, PACKETS>> {
         let mut lock = self.packets.lock().unwrap();
