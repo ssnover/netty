@@ -13,15 +13,19 @@ mod util;
 
 const ARP_TABLE_ENTRIES: usize = 32;
 
-pub struct NettyStack {
+pub struct NettyStack<'pool, const PKT_POOL_SZ: usize> {
     reader: ReadHalf<Tun>,
     writer: WriteHalf<Tun>,
+    pkt_pool: &'pool PacketPool<'pool, PKT_POOL_SZ>,
     arp_translation_table: [Option<arp::CacheEntry>; ARP_TABLE_ENTRIES],
     netdev: NettyDevice<'static>,
 }
 
-impl NettyStack {
-    pub fn new<'a>(if_name: &'a str) -> Result<Self, Box<dyn std::error::Error>> {
+impl<'pool, const PKT_POOL_SZ: usize> NettyStack<'pool, PKT_POOL_SZ> {
+    pub fn new<'a>(
+        if_name: &'a str,
+        pkt_pool: &'pool PacketPool<'pool, PKT_POOL_SZ>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let tun = tokio_tun::TunBuilder::new()
             .name(if_name)
             .tap(true)
@@ -32,6 +36,7 @@ impl NettyStack {
         Ok(Self {
             reader,
             writer,
+            pkt_pool,
             arp_translation_table: [None; ARP_TABLE_ENTRIES],
             netdev: NettyDevice {
                 hwaddr: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],

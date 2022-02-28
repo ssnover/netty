@@ -4,76 +4,131 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum PacketStatus {
+    /// This slot in the packet pool is ready to be used
     Empty,
+    /// This slot has been given to the caller and has not been returned
     Allocated,
+    /// This packet is waiting on an ARP packet for more information
     WaitingForArp,
+    /// This packet can be processed for writing to the network
     ReadyToTransmit,
+    /// This packet can be read into a buffer and given to the user
     ReadyToRead,
 }
 
 pub const PACKET_SIZE: usize = 1568;
 
-pub struct Packet<'pool> {
+/// A wrapper around access to information about a packet in the packetpool.
+/// * `idx` - The index of the packet in the pool
+/// * `buf` - A pointer into the wider pool aligned on the beginning of the packet.
+/// * `pool` - A reference back to the pool the packet came from.
+pub struct Packet<'buf, 'pool, const SIZE: usize> {
     idx: usize,
     buf: *mut u8,
-    _marker: PhantomData<&'pool ()>,
+    used_bytes: Option<usize>,
+    pool: &'pool PacketPool<'buf, SIZE>,
 }
 
-impl<'pool> Packet<'pool> {
-    fn from_packet(idx: usize, pkt: &PacketInner<'pool>) -> Self {
-        Packet { idx, buf: pkt.buf, _marker: PhantomData }
+impl<'buf, 'pool, const SIZE: usize> Packet<'buf, 'pool, SIZE> {
+    fn from_packet(
+        idx: usize,
+        pkt: &PacketInner<'buf>,
+        pool: &'pool PacketPool<'buf, SIZE>,
+    ) -> Self {
+        Packet {
+            idx,
+            buf: pkt.buf,
+            used_bytes: Some(pkt.used_bytes),
+            pool,
+        }
+    }
+
+    pub fn write_data(&self, idx: usize, buf: &[u8]) -> io::Result<()> {
+        if idx + buf.len() > PACKET_SIZE {
+            Err(std::io::ErrorKind::InvalidInput.into())
+        } else {
+            unsafe { self.buf.copy_from(buf.as_ptr(), buf.len()); }
+            Ok(())
+        }
+    }
+
+    pub fn read_data(self, buf: &mut[u8]) -> io::Result<usize> {
+        unsafe { self.buf.copy_to(buf.as_mut_ptr(), buf.len()); }
+        if buf.len() < PACKET_SIZE {
+            Err(std::io::ErrorKind::UnexpectedEof.into())
+        } else {
+            Ok(self.used_bytes.unwrap_or(PACKET_SIZE))
+        }
     }
 }
 
+impl<'buf, 'pool, const SIZE: usize> Drop for Packet<'buf, 'pool, SIZE> {
+    fn drop(&mut self) {
+        self.pool.release(self.idx);
+    }
+}
+
+/// This is the interal packet representation which tracks the packet's status
+/// and can be copied as necessary. Don't let library callers have something
+/// that can be copied since we've got a pointer into the buffer
 #[derive(Clone, Copy)]
-struct PacketInner<'pool> {
+struct PacketInner<'buf> {
     status: PacketStatus,
     buf: *mut u8,
-    _marker: PhantomData<&'pool ()>,
+    used_bytes: usize,
+    _marker: PhantomData<&'buf ()>,
 }
 
-pub struct PacketPool<'pool, const PACKETS: usize = 0> {
-    packets: Arc<Mutex<[PacketInner<'pool>; PACKETS]>>,
+/// Maintains the buffer of the packet pool and gives access to free packets
+pub struct PacketPool<'buf, const PACKETS: usize> {
+    packets: Arc<Mutex<[PacketInner<'buf>; PACKETS]>>,
 }
 
-impl<'pool, const PACKETS: usize> PacketPool<'pool, PACKETS> {
-    pub fn new(buffer: &'pool mut [u8]) -> io::Result<PacketPool<'pool, PACKETS>> {
-        if buffer.len() % PACKET_SIZE != PACKETS {
+impl<'pool, 'buf, const PACKETS: usize> PacketPool<'buf, PACKETS> {
+    pub fn new(buffer: &'buf mut [u8]) -> io::Result<PacketPool<'buf, PACKETS>> {
+        if buffer.len() != PACKETS * PACKET_SIZE {
+            log::error!("Buffer provided was not the correct size");
             Err(io::ErrorKind::InvalidInput.into())
         } else {
+            // Iterates over the buffer and gives pointers to evenly spaced indexes to where
+            // packets should be located in the buffer
             let pool = PacketPool {
-                packets: Arc::new(Mutex::new(array_init::array_init::<_, _, PACKETS>(|idx| PacketInner {
-                    status: PacketStatus::Empty,
-                    buf: buffer[(idx * PACKET_SIZE)..((idx + 1) * PACKET_SIZE)].as_mut_ptr(),
-                    _marker: PhantomData,
+                packets: Arc::new(Mutex::new(array_init::array_init::<_, _, PACKETS>(|idx| {
+                    PacketInner {
+                        status: PacketStatus::Empty,
+                        buf: buffer[(idx * PACKET_SIZE)..((idx + 1) * PACKET_SIZE)].as_mut_ptr(),
+                        used_bytes: 0,
+                        _marker: PhantomData,
+                    }
                 }))),
             };
 
             Ok(pool)
         }
     }
-
-    pub fn allocate(&self) -> Option<Packet<'pool>> {
+   
+    /// Checks the packet pool for an unused packet slot and returns one if its available.
+    pub fn allocate(&'pool self) -> Option<Packet<'buf, 'pool, PACKETS>> {
         let mut lock = self.packets.lock().unwrap();
         for (idx, packet) in lock.iter_mut().enumerate() {
             if packet.status == PacketStatus::Empty {
                 (*packet).status = PacketStatus::Allocated;
-                return Some(Packet::from_packet(idx, &packet))
+                return Some(Packet::from_packet(idx, &packet, self));
             }
         }
         None
     }
 
-    fn release(&self, pkt: Packet, transmitted: bool) {
+    /// Returns a packet to the pool and out of control of client code
+    /// * `pkt_idx` - Index of the packet in the pool
+    fn release(&self, pkt_idx: usize) {
         let mut lock = self.packets.lock().unwrap();
-        if lock[pkt.idx].status != PacketStatus::Allocated && lock[pkt.idx].status != PacketStatus::ReadyToTransmit {
-            panic!("Somehow we got given a packet that we didn't allocate... O.o");
+        lock[pkt_idx].status = if lock[pkt_idx].status == PacketStatus::Allocated {
+            // User allocated a packet and then didn't send it
+            log::warn!("Packet allocated, but dropped without sending");
+            PacketStatus::Empty
         } else {
-            if transmitted {
-                lock[pkt.idx].status = PacketStatus::Empty;
-            } else {
-                lock[pkt.idx].status = PacketStatus::ReadyToTransmit;
-            }
+            PacketStatus::ReadyToTransmit
         }
     }
 }

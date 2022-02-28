@@ -13,7 +13,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = netty::PacketPool::<NUM_PACKETS>::new(&mut packet_pool_buffer).unwrap();
 
     let if_name = "tap0";
-    let mut netty = NettyStack::new(if_name)?;
+    let mut netty = NettyStack::new(if_name, &pool)?;
 
     let (connection, handle, _) = rtnetlink::new_connection()?;
     tokio::spawn(connection);
